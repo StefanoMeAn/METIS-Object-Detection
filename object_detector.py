@@ -1,5 +1,6 @@
-from detector_functions import*
-
+import libraries.object_detection as od
+from libraries.starcatalogs import StarCatalog
+import libraries.starfunctions as sf
 
 """------PARAMETERS FOR DATA LOADING------""" 
 # Path to the metis_folder.
@@ -19,7 +20,7 @@ OBS_FILE = "objects_files.pkl"
 
 """------STAR DETECTION PARAMETERS-------"""
 # Kernel information.
-KERNEL_PATH = "/home/stefano98/University of Padua/thesis/notebooks/kernels/solar-orbiter/kernels/mk"
+KERNEL_PATH = "/home/stefano98/University of Padua/thesis/Packages/Solar-orbiter/kernels/mk"
 KERNEL_NAME = "solo_ANC_soc-flown-mk.tm"
 
 # Define waveband in which pictures were taken.
@@ -29,7 +30,7 @@ UV = False
 MAX_MAG = 6
 
 # Catalog with stars.
-CAT = StarCatalog('Simbad') # Put this in the CSV_DIR.
+CAT = StarCatalog('Simbad')
 
 """------OBJECT DETECTION PARAMETERS------"""
 # Size for region proposal.
@@ -56,11 +57,11 @@ HEADERS_OBJ = ["LTP", "STP", "IDX", "PEAK_VAL", "X_COORD", "Y_COORD", "PRE_LABEL
 #### CODE RUNNING ####
 
 # Load kernel.
-spice = load_kernel(KERNEL_NAME, KERNEL_PATH)
+spice = sf.load_kernel(KERNEL_NAME, KERNEL_PATH)
 
 # Run object detection.
 
-folder_reader(CVS_FILE_FITS, OBS_FILE, DATA_DIR, CSV_DIR,
+od.folder_reader(CVS_FILE_FITS, OBS_FILE, DATA_DIR, CSV_DIR,
             KERNEL_PATH, KERNEL_NAME, MAX_MAG, UV, CAT, 
             HEADERS_TO_EXTRACT, HEADERS_TO_ADD, HEADERS_OBJ,
               BOX_SIZE, OVERLAPPING, THRESHOLD, LIM)

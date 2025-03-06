@@ -1,118 +1,16 @@
 
-import os
+
 import pandas as pd
+import numpy as np
 import math
-import collections
-import spicepy
-from starcatalogs import StarCatalog
-from scipy.stats import iqr
-from scipy.optimize import curve_fit
-from scipy.spatial import distance
-from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import find_peaks
+from libraries.utilities import get_iterable
 import itertools
-from star_functions import*
+import libraries.starfunctions as sf
+import os
+import libraries.utilities as ut
 
-
-import warnings
-# Suppress all warnings
-warnings.filterwarnings("ignore")
-
-### STAR DETECTION ###
-
-def extract_timestamp(fits_data):
-    """
-    Extract timestamp from a .fits object.
-
-    Parameters:
-        fits_data (astropy object): fits loaded.
-    Output:
-        timestamp (float): time where image was taken in UTC.
-    """
-    # Extrat time.
-    obt_beg = fits_data[0].header['OBT_BEG'] 
-    obt_end = fits_data[0].header['OBT_END']
-    obt_avg = (obt_beg + obt_end) / 2
-    frac, whole = math.modf(obt_avg)
-    frac *= 65536.
-    return str(int(whole))+':'+str(int(frac))
-
-def fits_loader(path, keys):
-
-    # Load .fits file
-    fits_file = fits.open(path)
-    # Extract timestamp 
-    timestamp = extract_timestamp(fits_file)
-    # Extract required headers for storing in .csv
-    fits_header = [fits_file[0].header[headers] for headers in keys]
-    # Extract image.
-    image = fits_file[0].data
-    # Close file
-    fits_file.close()
-
-    return timestamp, fits_header, image
-
-def star_detector_offline(KERNEL_NAME, KERNEL_PATH, time, UV, cat, max_mag):
-    """
-    Simulate the Field-of-view of the metis project and extract the possible visible stars.
-    For fast-performance, query the stars in a previously downloaded catalog.
-    Simulate the possible position of the on-orbit telescope and simulate its FOV.
-
-    Parameters:
-        KERNEL_NAME (str): name of the kernel to be used.
-        KERNEL_PATH (str): path to the kernels.
-        time (float): timestamp at which the .fits was generated.
-        UV (bool): waveband in which .fits was generated.
-        cat (starcatalogs): catalog with stars up to magnitude 7.
-        mag_stars (float): max magnitude for the star detection.
-    
-    Output:
-        catalog_stars (pandas-df): table with the obtained stars.
-    """
-
-    # Convert timestamp into ephemeris time.
-    et = scs2et(time, KERNEL_PATH)
-    # Extract angles.
-    ra, dec, roll = boresight(et, KERNEL_PATH,  UV=False)
-    # Get status vector vs SSB.
-    posvel, dist = spkezr(KERNEL_PATH,"SSB", et)
-    # Build wcs from apparent Metis pointing.
-    wcs = wcs_from_boresight(ra, dec, roll, UV)
-    # Adjust boresight with nominal wcs.
-    ra_adj, dec_adj = wcs.wcs_pix2world([wcs.wcs.crpix], 0).flatten()
-    # Find stars through catalog search.
-    catalog_stars = cat.query(ra_adj, dec_adj, METIS_fov, METIS_fov_min)
-    # Add stellar aberration corrected coordinates.
-    ra_abcorr, dec_abcorr = stelab(KERNEL_PATH, catalog_stars["ra"], 
-                                         catalog_stars["dec"], et)
-    catalog_stars["ra_abcorr"] = ra_abcorr
-    catalog_stars["dec_abcorr"] = dec_abcorr
-    # Add sensor coordinates to catalog star list.
-    x, y = wcs.wcs_world2pix(ra_abcorr, dec_abcorr, 0)
-    catalog_stars["xsensor"] = x
-    catalog_stars["ysensor"] = y
-    # Remove stars outside the sensor
-    catalog_stars = catalog_stars[
-    (catalog_stars.xsensor > 0) & (catalog_stars.xsensor < wcs.pixel_shape[0]) &
-    (catalog_stars.ysensor > 0) & (catalog_stars.ysensor < wcs.pixel_shape[1])
-        ]
-    # Filter stars according to the star magnitude.
-    catalog_stars = catalog_stars[catalog_stars["Vmag"]<=max_mag]
-    return catalog_stars.reset_index().drop(["index"], axis = 1), et
-
-def sorter(list):
-    """
-    Sort a list with elements of the type ABCNN, where A, B, C are letters and N is a number.
-
-    Args:
-        list (list): List with LTPs or STPs.
-    Returns:
-        Sorted list.
-    """
-    return sorted(list, key=lambda x: int(x[3:]))
-
-### PEAK DETECTOR ###
 
 def image_slicer(image, size, overlapping_size = 3):
     """
@@ -264,7 +162,6 @@ def peak_detector_main(columns, ltp, stp, id, image, coordinates, coeff, full_im
                 
     return pd_df     
 
-
 def cropped_region(image, x_pos, y_pos, lim):
     """
     Crop a small region from a given image. If coordinates are near boundaries, generate zero padding.
@@ -412,114 +309,41 @@ def remove_similar_objects(pandas_df, threshold = 5):
 
     return pandas_df    
 
+def points_inside_fov(x, y, center, scale):
 
-from scipy.stats import iqr
-def iqr_test(array, x, y):
+    # Metis FOV.
+    radius1 = sf.METIS_fov_min/scale
+    radius2 = sf.METIS_fov/scale
+
+    outside_first = (x - center[0])**2 + (y - center[1])**2 >= radius1**2
+    inside_second = (x - center[0])**2 + (y - center[1])**2 <= radius2**2
+
+    return outside_first and inside_second
+
+def remove_objects_fov(df, center, scale):
     """
-    Detect outliers in a numpy 2d array.
+    Remove objects that are outside METIS FOV.
 
     Parameters:
-        array (array): 2d array from a cropped region.
-        pixel (array): xy coordinate with pixel position.
-    
-    """
-    # Flatten 2D image.
-    pixel = array[x, y]
-    flatten_array = array.flatten()
-    iqr_val = iqr(flatten_array)
+        df (pandas): dataframe with stars
+        center (list): x, y coordinate of FOV center
+        scale (float): scale.
 
-    # Compute Q1, Q3.
-    Q1 = np.percentile(flatten_array, 25)
-    Q3 = np.percentile(flatten_array, 75)
-    lower_bound = Q1 - 1.5 * iqr_val
-    upper_bound = Q3 + 1.5 * iqr_val
-
-    if (pixel < lower_bound) | (pixel > upper_bound):
-        return "bright pixel"
-    else:
-        return None
-
-
-def detect_outliers(dataframe):
-    """
-    Given a pandas dataframe, check each proposal region and distinguish which ones are broken pixels.
-
-    Parameters:
-        dataframe (dataframe): pandas dataframe with detected objects.
-    
     Return:
-        classified_dataframe:
+        df (pandas): filtered dataframe.
     """
+    vals = []
 
-    # Extract size.
-    size_df = len(dataframe)
-    size_reg = dataframe["REGION"].iloc[0].shape[0]
-    
-    for idx in range(size_df):
-        if dataframe["PRE_LABEL"].iloc[idx]!= "star":
-            # Extract region number.
-            region = dataframe["REGION"].iloc[idx]
+    for i in range(len(df)):  
+        x = df["X_COORD"].iloc[i]
+        y = df["Y_COORD"].iloc[i]
+        accept = points_inside_fov(x, y, center, scale)
 
-            # Compute coordinate with respect of the proposed region.
-            x = int(size_reg/2)
-            y = int(size_reg/2)
+        if not accept:
+            vals.append(df.index[i])  
 
-            # Check if detected point is an outlier
-            val = iqr_test(region, x, y)
-            
-            if val:
-                dataframe["PRE_LABEL"].iloc[idx] = val
-    
-    return dataframe
-
-
-
-def gaussian_2d(coords, A, x0, y0, sigma_x, sigma_y, C):
-    """2D Gaussian with offset"""
-    x, y = coords
-    return A * np.exp(-(((x - x0)**2) / (2 * sigma_x**2) + ((y - y0)**2) / (2 * sigma_y**2))) + C
-
-def gaussian_fitter(image, x, y):
-    """
-    Fit a 2D-Gaussian function in a image and return the obtained parameters.
-
-    Params:
-        image (2d-array): image with possible gaussian.
-
-    Returns:
-        A (float): amplitude.
-        ux (float): mean in x.
-        uy (float): mean in y.
-        stdx (float): std in x.
-        stdy (float): std in y.
-    """
-
-    # Convert 2D into 1D data.
-    x_flatted = x.ravel()
-    y_flatted = y.ravel()
-    image_flatted = image.ravel()
-
-    # Compute intial guess.
-    A_0 = np.max(image)
-    x0_0 = image.shape[1] // 2  
-    y0_0 = image.shape[0] // 2  
-    stdx_0 = image.shape[1] / 10  
-    stdy_0 = image.shape[0] / 10
-    C_0 = np.min(image) 
-
-    # Start fitting
-    popt, pcov = curve_fit(gaussian_2d, (x_flatted, y_flatted),
-                            image_flatted, p0=(A_0, x0_0, y0_0, stdx_0, stdy_0, C_0))
-    
-    # Extract parameters
-    A, ux, uy, stdx, stdy, C = popt
-    
-    return A, ux, uy, stdx, stdy, C
-
-
-
-
-##### FUNCTIONS FOR DETECTION #####
+    df = df.drop(vals)  
+    return df
 
 def checkpoint_status(csv_file, csv_folder):
     """
@@ -548,8 +372,6 @@ def checkpoint_status(csv_file, csv_folder):
         checkpoint = False
     
     return checkpoint
-
-
 
 def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
                   KERNEL_PATH, KERNEL_NAME, magnitude,uv, catalog,
@@ -594,7 +416,7 @@ def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
     ### FOLDER ITERATION ###
     
     # Extract folder with LTPs.
-    LTPs_folder = sorter(get_iterable(os.listdir(metis_folder)))
+    LTPs_folder = ut.sorter(get_iterable(os.listdir(metis_folder)))
 
     # Load checkpoint for LTP.
     if checkpoints:
@@ -605,7 +427,7 @@ def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
         print(f"Starting analysis with: {ltp_folder}") 
 
         # Extract folder with STPs.
-        STPs_folder = sorter(get_iterable(os.listdir(os.path.join(metis_folder, ltp_folder))))
+        STPs_folder = ut.sorter(get_iterable(os.listdir(os.path.join(metis_folder, ltp_folder))))
         
         
         # Load checkpoint in STP.
@@ -635,11 +457,11 @@ def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
                 ## STAR DETECTION ##
 
                 # Extract timestamp, headers and the image of every .fits file
-                timestamp, headers, image = fits_loader(os.path.join(metis_folder, ltp_folder, stp_folder, fits_file), headers_fits)
+                timestamp, headers, image = ut.fits_loader(os.path.join(metis_folder, ltp_folder, stp_folder, fits_file), headers_fits)
                 # Retrieve star position.
-                stars_detected, et = star_detector_offline(KERNEL_NAME, KERNEL_PATH, timestamp, uv, catalog, magnitude)
+                stars_detected, et, scale, center = sf.star_detector_offline(KERNEL_NAME, KERNEL_PATH, timestamp, uv, catalog, magnitude)
                 # Compute UTC_TIME.
-                timestamp = et2utc(et)
+                timestamp = sf.et2utc(et)
 
 
                 ## OBJECT DETECTION ##
@@ -647,7 +469,7 @@ def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
                 # Split image into several proposal regions.
                 regions, coordinates = image_slicer(image, size, overlapping)
                 # Search possible peaks given a threshold.
-                peaks = peak_detector_main(headers_objs, ltp_folder, stp_folder, id, regions, coordinates, 9, image, lim)
+                peaks = peak_detector_main(headers_objs, ltp_folder, stp_folder, id, regions, coordinates, std, image, lim)
 
                 ## OBJECT PRE-LABELING ##
 
@@ -657,6 +479,8 @@ def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
 
                 # Remove similar objects.
                 peaks = remove_similar_objects(peaks, 5)
+                # Remove peaks outside metis foc
+                peaks = remove_objects_fov(peaks, center, scale)
 
 
                 ## DATA SAVING ##
@@ -670,3 +494,5 @@ def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
                                                                     timestamp, len(peaks[peaks["PRE_LABEL"] =="star"]) ,
                                                                     len(peaks[peaks["PRE_LABEL"] =="object"])]
                 fits_file_pkl.to_pickle(fits_path)
+
+

@@ -50,7 +50,7 @@ class StarCatalog():
             query sample Vmag <= 7
             votable close 
             """
-            self._cat = pd.read_csv('simbad_vmag7.csv')
+            self._cat = pd.read_csv('libraries/simbad_vmag7.csv')
         
     def query(self, ra, dec, r_max, r_min=0):
         # Returns stars within a circle centered in ra, dec
