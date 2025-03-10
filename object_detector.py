@@ -1,10 +1,11 @@
 import libraries.object_detection as od
 from libraries.starcatalogs import StarCatalog
 import libraries.starfunctions as sf
+import csv
 
 """------PARAMETERS FOR DATA LOADING------""" 
 # Path to the metis_folder.
-DATA_DIR = "/home/stefano98/University of Padua/thesis/Packages/METIS-Object-Detection/metis_vis"
+DATA_DIR = "/home/stefano98/University of Padua/thesis/Packages/METIS-Object-Detection/metis_all"
 
 # Path to write .csvs
 CSV_DIR = "/home/stefano98/University of Padua/thesis/Packages/METIS-Object-Detection"
@@ -16,6 +17,9 @@ CVS_FILE_FITS = "fits_files.pkl"
 
 # Name for object saving file.
 OBS_FILE = "objects_files.pkl"
+
+# Name for CSVs failed.
+CSV_FAILURES = "csv_failures.csv"
 
 
 """------STAR DETECTION PARAMETERS-------"""
@@ -61,7 +65,7 @@ spice = sf.load_kernel(KERNEL_NAME, KERNEL_PATH)
 
 # Run object detection.
 
-od.folder_reader(CVS_FILE_FITS, OBS_FILE, DATA_DIR, CSV_DIR,
+od.folder_reader(CSV_FAILURES, CVS_FILE_FITS, OBS_FILE, DATA_DIR, CSV_DIR,
             KERNEL_PATH, KERNEL_NAME, MAX_MAG, UV, CAT, 
             HEADERS_TO_EXTRACT, HEADERS_TO_ADD, HEADERS_OBJ,
               BOX_SIZE, OVERLAPPING, THRESHOLD, LIM)

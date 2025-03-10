@@ -10,6 +10,7 @@ import itertools
 import libraries.starfunctions as sf
 import os
 import libraries.utilities as ut
+import csv
 
 
 def image_slicer(image, size, overlapping_size = 3):
@@ -373,10 +374,10 @@ def checkpoint_status(csv_file, csv_folder):
     
     return checkpoint
 
-def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
+def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
                   KERNEL_PATH, KERNEL_NAME, magnitude,uv, catalog,
                   headers_fits, headers_fits_extra, headers_objs,
-                  size, overlapping, std, lim
+                  size, overlapping, std, lim, filter = "vl-image"
                   ):
     """"
     Extract point-of-interest in a given set of L0 images. 
@@ -388,6 +389,7 @@ def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
     # Define full paths for savind data.
     obj_path = os.path.join(pkls_folder, pkl_obj)
     fits_path = os.path.join(pkls_folder, pkl_fits)
+    csvf_path = os.path.join(pkls_folder, csvs_fail)
 
 
     # Check if there is already a previous pickle file.
@@ -404,6 +406,7 @@ def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
         # Save DFs into pickle for preserving array structure.
         fits_file_pkl.to_pickle(fits_path)
         objs_file_pkl.to_pickle(obj_path)
+        id_ck = -1
     
     # If pkl_fits already exist, then extract the LTP, STP, ID from the last analyzed file.
     else:
@@ -440,59 +443,70 @@ def folder_reader(pkl_fits, pkl_obj, metis_folder, pkls_folder,
 
             # Extract files in each folder.
             fits_folder = sorted(get_iterable(os.listdir(os.path.join(metis_folder, ltp_folder, stp_folder))))
+            # Apply filter.
+            fits_folder = [file for file in fits_folder if filter in file]
+
             
             if checkpoints:
                 # Load checkpoint in FITSs.
-                fits_file_chk = fits_folder[id_ck]
-                fits_folder = fits_folder[fits_folder.index(fits_file_chk) +1 :]
-            
+                fits_folder = fits_folder[id_ck + 1 :]
+        
             ### DEACTIVATE CHECKPOINT ###
                 checkpoints = False
-
+            
             ### FITS ANALYSIS AND OBJECT DETECTION ###
+
+            if not fits_folder:
+                continue
 
             for id, fits_file in enumerate(fits_folder):
                 print(f"\t\t File {id}")
 
-                ## STAR DETECTION ##
+                try: 
+                    ## STAR DETECTION ##
 
-                # Extract timestamp, headers and the image of every .fits file
-                timestamp, headers, image = ut.fits_loader(os.path.join(metis_folder, ltp_folder, stp_folder, fits_file), headers_fits)
-                # Retrieve star position.
-                stars_detected, et, scale, center = sf.star_detector_offline(KERNEL_NAME, KERNEL_PATH, timestamp, uv, catalog, magnitude)
-                # Compute UTC_TIME.
-                timestamp = sf.et2utc(et)
-
-
-                ## OBJECT DETECTION ##
-
-                # Split image into several proposal regions.
-                regions, coordinates = image_slicer(image, size, overlapping)
-                # Search possible peaks given a threshold.
-                peaks = peak_detector_main(headers_objs, ltp_folder, stp_folder, id, regions, coordinates, std, image, lim)
-
-                ## OBJECT PRE-LABELING ##
-
-                # Check if stars are found.
-                if len(stars_detected)>0:
-                    peaks, stars_remained = star_comparison(peaks, stars_detected)
-
-                # Remove similar objects.
-                peaks = remove_similar_objects(peaks, 5)
-                # Remove peaks outside metis foc
-                peaks = remove_objects_fov(peaks, center, scale)
+                    # Extract timestamp, headers and the image of every .fits file
+                    timestamp, headers, image = ut.fits_loader(os.path.join(metis_folder, ltp_folder, stp_folder, fits_file), headers_fits)
+                    # Retrieve star position.
+                    stars_detected, et, scale, center = sf.star_detector_offline(KERNEL_NAME, KERNEL_PATH, timestamp, uv, catalog, magnitude)
+                    # Compute UTC_TIME.
+                    timestamp = sf.et2utc(et)
 
 
-                ## DATA SAVING ##
+                    ## OBJECT DETECTION ##
 
-                # Merge and save data in objects file.
-                objs_file_pkl = pd.concat([objs_file_pkl, peaks])
-                objs_file_pkl.to_pickle(obj_path)
+                    # Split image into several proposal regions.
+                    regions, coordinates = image_slicer(image, size, overlapping)
+                    # Search possible peaks given a threshold.
+                    peaks = peak_detector_main(headers_objs, ltp_folder, stp_folder, id, regions, coordinates, std, image, lim)
 
-                # Append data in fits file.
-                fits_file_pkl.loc[len(fits_file_pkl)] = headers + [ltp_folder, stp_folder, id,
-                                                                    timestamp, len(peaks[peaks["PRE_LABEL"] =="star"]) ,
-                                                                    len(peaks[peaks["PRE_LABEL"] =="object"])]
-                fits_file_pkl.to_pickle(fits_path)
+                    ## OBJECT PRE-LABELING ##
+
+                    # Check if stars are found.
+                    if len(stars_detected)>0:
+                        peaks, stars_remained = star_comparison(peaks, stars_detected)
+
+                    # Remove similar objects.
+                    peaks = remove_similar_objects(peaks, 5)
+                    # Remove peaks outside metis foc
+                    peaks = remove_objects_fov(peaks, center, scale)
+
+
+                    ## DATA SAVING ##
+
+                    # Merge and save data in objects file.
+                    objs_file_pkl = pd.concat([objs_file_pkl, peaks])
+                    objs_file_pkl.to_pickle(obj_path)
+
+                    # Append data in fits file.
+                    fits_file_pkl.loc[len(fits_file_pkl)] = headers + [ltp_folder, stp_folder, id,
+                                                                        timestamp, len(peaks[peaks["PRE_LABEL"] =="star"]) ,
+                                                                        len(peaks[peaks["PRE_LABEL"] =="object"])]
+                    fits_file_pkl.to_pickle(fits_path)
+
+                except Exception as e:
+                    with open(csvf_path, "a") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([ltp_folder, stp_folder, fits_file, str(e)])
 
 
