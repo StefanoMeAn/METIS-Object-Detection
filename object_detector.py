@@ -27,7 +27,7 @@ KERNEL_NAME = "solo_ANC_soc-flown-mk.tm"
 UV = False
 
 # Maximum stellar magnitude.
-MAX_MAG = 6
+MAX_MAG = 7
 
 # Catalog with stars.
 CAT = StarCatalog('Simbad')
@@ -38,7 +38,7 @@ BOX_SIZE = 20
 # Size for overlapping between regions.
 OVERLAPPING = 3
 # Threshold for peak finding.
-THRESHOLD = 8
+THRESHOLD = 9
 # Size for cropped region (total_size = LIM*2 +1)
 LIM = 10 
 
