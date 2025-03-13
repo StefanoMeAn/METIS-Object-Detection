@@ -126,7 +126,7 @@ import warnings
 # Suppress all warnings
 warnings.filterwarnings("ignore")
 
-def peak_detector_main(columns, ltp, stp, id, image, coordinates, coeff, full_image, lim):
+def peak_detector_main(ltp, stp, id, image, coordinates, coeff, full_image, lim, size, filename):
     """
     Detect points-of-interest in a 2d-array.
 
@@ -140,7 +140,8 @@ def peak_detector_main(columns, ltp, stp, id, image, coordinates, coeff, full_im
     """
     # Generate dataframe
     # Extract size
-    pd_df = pd.DataFrame( columns= columns)
+    pd_df = pd.DataFrame( columns= ["LTP", "STP", "IDX", "PEAK_VAL", "X_COORD", "Y_COORD",
+                                     "PRE_LABEL", "INFO", "REGION", "FILENAME"])
     size= image[0].shape[0]
 
     # Open all proposed regions and read one by one.
@@ -159,7 +160,8 @@ def peak_detector_main(columns, ltp, stp, id, image, coordinates, coeff, full_im
 
                 if len(get_iterable(real_pos)) == 2:
                     pd_df.loc[len(pd_df)] = [ltp, stp, id, points["peak_value"][0]+median, real_pos[1],
-                                              real_pos[0], "object","info", cropped_region(full_image, real_pos[1], real_pos[0], lim)]
+                                              real_pos[0], "object", "info", cropped_region(full_image, real_pos[1], real_pos[0], lim),
+                                              filename]
                 
     return pd_df     
 
@@ -376,7 +378,6 @@ def checkpoint_status(csv_file, csv_folder):
 
 def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
                   KERNEL_PATH, KERNEL_NAME, magnitude,uv, catalog,
-                  headers_fits, headers_fits_extra, headers_objs,
                   size, overlapping, std, lim, filter = "vl-image"
                   ):
     """"
@@ -384,7 +385,13 @@ def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
 
     """
 
-    
+    # Normal structure of a LO FITS file.
+    headers_fits = ['APID', 'BITPIX', 'BLANK', 'CHECKSUM', 'COMMENT', 'COMPRESS',
+       'COMP_RAT', 'CREATOR', 'DATAMAX', 'DATAMIN', 'DATASUM', 'EXTEND',
+       'FILENAME', 'FILE_RAW', 'HISTORY', 'INSTRUME', 'LEVEL', 'LONGSTRN',
+       'NAXIS', 'NAXIS1', 'NAXIS2', 'OBT_BEG', 'OBT_END', 'ORIGIN', 'SIMPLE',
+       'VERSION', 'VERS_SW']
+
     ### DATA LOADING ###
     # Define full paths for savind data.
     obj_path = os.path.join(pkls_folder, pkl_obj)
@@ -398,10 +405,14 @@ def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
     # If it is first run, create the pickle files with their corresponding headers.
     if not checkpoints:
         # Create file for fits.
-        fits_file_pkl = pd.DataFrame(columns = headers_fits + headers_fits_extra)
+        fits_file_pkl = pd.DataFrame(columns = headers_fits + ["LTP", "STP", "IDX",
+                                                               "TIMESTAMP", "STARS", "OBJECTS"])
 
         # Create file for object detection.
-        objs_file_pkl = pd.DataFrame(columns = headers_objs)
+        objs_file_pkl = pd.DataFrame(columns = ["LTP", "STP", "IDX",
+                                                 "PEAK_VAL", "X_COORD", "Y_COORD",
+                                                   "PRE_LABEL", "INFO", "REGION",
+                                                   "FILENAME"])
 
         # Save DFs into pickle for preserving array structure.
         fits_file_pkl.to_pickle(fits_path)
@@ -466,7 +477,7 @@ def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
                     ## STAR DETECTION ##
 
                     # Extract timestamp, headers and the image of every .fits file
-                    timestamp, headers, image = ut.fits_loader(os.path.join(metis_folder, ltp_folder, stp_folder, fits_file), headers_fits)
+                    timestamp, headers, image = ut.fits_loader(os.path.join(metis_folder, ltp_folder, stp_folder, fits_file))
                     # Retrieve star position.
                     stars_detected, et, scale, center = sf.star_detector_offline(KERNEL_NAME, KERNEL_PATH, timestamp, uv, catalog, magnitude)
                     # Compute UTC_TIME.
@@ -478,7 +489,7 @@ def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
                     # Split image into several proposal regions.
                     regions, coordinates = image_slicer(image, size, overlapping)
                     # Search possible peaks given a threshold.
-                    peaks = peak_detector_main(headers_objs, ltp_folder, stp_folder, id, regions, coordinates, std, image, lim)
+                    peaks = peak_detector_main(ltp_folder, stp_folder, id, regions, coordinates, std, image, lim, size, headers["FILENAME"])
 
                     ## OBJECT PRE-LABELING ##
 
@@ -499,9 +510,13 @@ def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
                     objs_file_pkl.to_pickle(obj_path)
 
                     # Append data in fits file.
-                    fits_file_pkl.loc[len(fits_file_pkl)] = headers + [ltp_folder, stp_folder, id,
+                    headers = pd.DataFrame([headers])
+                    headers_extra = pd.DataFrame([[ltp_folder, stp_folder, id,
                                                                         timestamp, len(peaks[peaks["PRE_LABEL"] =="star"]) ,
-                                                                        len(peaks[peaks["PRE_LABEL"] =="object"])]
+                                                                        len(peaks[peaks["PRE_LABEL"] =="object"])]], columns= ["LTP", "STP", "IDX",
+                                                               "TIMESTAMP", "STARS", "OBJECTS"])
+        
+                    fits_file_pkl.loc[len(fits_file_pkl)] = pd.concat([headers, headers_extra], axis = 1).iloc[0]
                     fits_file_pkl.to_pickle(fits_path)
 
                 except Exception as e:

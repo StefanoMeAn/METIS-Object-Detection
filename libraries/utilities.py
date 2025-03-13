@@ -30,14 +30,14 @@ def extract_timestamp(fits_data):
     frac *= 65536.
     return str(int(whole))+':'+str(int(frac))
 
-def fits_loader(path, keys):
+def fits_loader(path):
 
     # Load .fits file
     fits_file = fits.open(path)
     # Extract timestamp 
     timestamp = extract_timestamp(fits_file)
     # Extract required headers for storing in .csv
-    fits_header = [fits_file[0].header[headers] for headers in keys]
+    fits_header = fits_file[0].header
     # Extract image.
     image = fits_file[0].data
     # Close file

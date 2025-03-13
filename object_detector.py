@@ -48,8 +48,7 @@ LIM = 10
 
 
 """------HEADERS FOR PICKLE FILES------"""
-# Headers to extract from the .fits file (L0).
-HEADERS_TO_EXTRACT = ["FILENAME", "OBT_BEG", "OBT_END", "DATAMIN", "DATAMAX"]
+
 
 # Additional headers to be created in the FITS_FILE.csv.
 HEADERS_TO_ADD = ["LTP", "STP", "IDX","TIMESTAMP", "STARS", "OBJECTS"]
@@ -67,5 +66,4 @@ spice = sf.load_kernel(KERNEL_NAME, KERNEL_PATH)
 
 od.folder_reader(CSV_FAILURES, CVS_FILE_FITS, OBS_FILE, DATA_DIR, CSV_DIR,
             KERNEL_PATH, KERNEL_NAME, MAX_MAG, UV, CAT, 
-            HEADERS_TO_EXTRACT, HEADERS_TO_ADD, HEADERS_OBJ,
               BOX_SIZE, OVERLAPPING, THRESHOLD, LIM)
