@@ -356,7 +356,7 @@ def star_detector_offline(KERNEL_NAME, KERNEL_PATH, time, UV, cat, max_mag):
         KERNEL_PATH (str): path to the kernels.
         time (float): timestamp at which the .fits was generated.
         UV (bool): waveband in which .fits was generated.
-        cat (starcatalogs): catalog with stars up to magnitude 7.
+        cat (starcatalogs): catalog with stars up to magnitude 8.
         mag_stars (float): max magnitude for the star detection.
     
     Output:
@@ -392,6 +392,6 @@ def star_detector_offline(KERNEL_NAME, KERNEL_PATH, time, UV, cat, max_mag):
     (catalog_stars.ysensor > 0) & (catalog_stars.ysensor < wcs.pixel_shape[1])
         ]
     # Filter stars according to the star magnitude.
-    catalog_stars = catalog_stars[catalog_stars["Vmag"]<=max_mag]
+    catalog_stars = catalog_stars[catalog_stars["mag"]<=max_mag]
 
     return catalog_stars.reset_index().drop(["index"], axis = 1), et, -wcs.wcs.cdelt[0], wcs.wcs.crpix

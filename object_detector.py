@@ -5,7 +5,7 @@ import csv
 
 """------PARAMETERS FOR DATA LOADING------""" 
 # Path to the metis_folder.
-DATA_DIR = "/home/stefano98/University of Padua/thesis/Packages/METIS-Object-Detection/metis_all"
+DATA_DIR = "/home/stefano98/University of Padua/thesis/Packages/METIS-Object-Detection/metis_vis"
 
 # Path to write .csvs
 CSV_DIR = "/home/stefano98/University of Padua/thesis/Packages/METIS-Object-Detection"
@@ -31,20 +31,20 @@ KERNEL_NAME = "solo_ANC_soc-flown-mk.tm"
 UV = False
 
 # Maximum stellar magnitude.
-MAX_MAG = 7
+MAX_MAG = 8
 
 # Catalog with stars.
 CAT = StarCatalog('Simbad')
 
 """------OBJECT DETECTION PARAMETERS------"""
 # Size for region proposal.
-BOX_SIZE = 20
+BOX_SIZE = 30
 # Size for overlapping between regions.
 OVERLAPPING = 3
 # Threshold for peak finding.
 THRESHOLD = 9
 # Size for cropped region (total_size = LIM*2 +1)
-LIM = 10 
+LIM = 30 
 
 
 """------HEADERS FOR PICKLE FILES------"""

@@ -11,6 +11,33 @@ import libraries.starfunctions as sf
 import os
 import libraries.utilities as ut
 import csv
+import sqlite3
+
+def save_peaks_to_sql(peaks_df, db_path):
+    import pickle
+    peaks_df = peaks_df.copy()
+    peaks_df["REGION"] = peaks_df["REGION"].apply(lambda x: pickle.dumps(x))
+    with sqlite3.connect(db_path) as conn:
+        peaks_df.to_sql("psfs", conn, if_exists="append", index=False)
+
+
+def init_sqlite_db(db_path):
+    with sqlite3.connect(db_path) as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS psfs (
+                LTP TEXT,
+                STP TEXT,
+                IDX INTEGER,
+                PEAK_VAL REAL,
+                X_COORD INTEGER,
+                Y_COORD INTEGER,
+                PRE_LABEL TEXT,
+                INFO TEXT,
+                REGION BLOB,
+                FILENAME TEXT
+            )
+        ''')
+
 
 
 def image_slicer(image, size, overlapping_size = 3):
@@ -312,13 +339,28 @@ def remove_similar_objects(pandas_df, threshold = 5):
 
     return pandas_df    
 
-def points_inside_fov(x, y, center, scale):
+def points_inside_fov(x, y, center, scale, factor = 0.1):
+    """
+    Remove objects whose coordinates are outside metis detection region.
+
+    Parameters:
+        x (float): x coordinate of the detected object.
+        y (float): y coordinate of the detected object.
+        center (list): x, y coordinate of the metis center POV.
+        scale (float): scale factor for matching FOV limits with the image.
+        factor (float): multiplication factor for tunning up FOV limit.
+
+    Return:
+        (bool): True if detected object falls in new region.
+    """
 
     # Metis FOV.
-    radius1 = sf.METIS_fov_min/scale
-    radius2 = sf.METIS_fov/scale
+    radius1 = (sf.METIS_fov_min + factor)/scale
+    radius2 = (sf.METIS_fov - factor)/scale
 
+    # Check if object is outside first boundary.
     outside_first = (x - center[0])**2 + (y - center[1])**2 >= radius1**2
+    # Check if object is inside second boundary.
     inside_second = (x - center[0])**2 + (y - center[1])**2 <= radius2**2
 
     return outside_first and inside_second
@@ -401,6 +443,11 @@ def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
 
     # Check if there is already a previous pickle file.
     checkpoints = checkpoint_status(pkl_fits, pkls_folder)
+
+    # SQL APPROACH.
+    sqlite_path = os.path.join(pkls_folder, "psf_metadata.db")
+    init_sqlite_db(sqlite_path)
+
 
     # If it is first run, create the pickle files with their corresponding headers.
     if not checkpoints:
@@ -505,9 +552,16 @@ def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
 
                     ## DATA SAVING ##
 
-                    # Merge and save data in objects file.
-                    objs_file_pkl = pd.concat([objs_file_pkl, peaks])
-                    objs_file_pkl.to_pickle(obj_path)
+                    # NORMAL APPROACH: Merge and save data in objects file. 
+                    #objs_file_pkl = pd.concat([objs_file_pkl, peaks])
+                    #objs_file_pkl.to_pickle(obj_path)
+
+                    # SQL APPROACH: Use databases to store metadata and store
+                    # each PSFs as separated file.
+                    save_peaks_to_sql(peaks, sqlite_path)
+
+
+
 
                     # Append data in fits file.
                     headers = pd.DataFrame([headers])
