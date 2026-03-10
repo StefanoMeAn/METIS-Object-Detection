@@ -1,30 +1,25 @@
-
-
 import pandas as pd
 import numpy as np
 import math
 from astropy.stats import sigma_clipped_stats
-from photutils.detection import find_peaks
+from photutils.detection import find_peaks, DAOStarFinder
 from libraries.utilities import get_iterable
 import itertools
 import libraries.starfunctions as sf
 import os
 import libraries.utilities as ut
-import csv
 import sqlite3
+import warnings
+import h5py
 
-def save_peaks_to_sql(peaks_df, db_path):
-    import pickle
-    peaks_df = peaks_df.copy()
-    peaks_df["REGION"] = peaks_df["REGION"].apply(lambda x: pickle.dumps(x))
-    with sqlite3.connect(db_path) as conn:
-        peaks_df.to_sql("psfs", conn, if_exists="append", index=False)
+warnings.filterwarnings("ignore")
 
 
 def init_sqlite_db(db_path):
     with sqlite3.connect(db_path) as conn:
-        conn.execute('''
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS psfs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 LTP TEXT,
                 STP TEXT,
                 IDX INTEGER,
@@ -33,36 +28,205 @@ def init_sqlite_db(db_path):
                 Y_COORD INTEGER,
                 PRE_LABEL TEXT,
                 INFO TEXT,
-                REGION BLOB,
+                REGION_ID INTEGER,
                 FILENAME TEXT
             )
-        ''')
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS processed_fits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                LTP TEXT,
+                STP TEXT,
+                IDX INTEGER,
+                TIMESTAMP TEXT,
+                FILENAME TEXT,
+                STARS INTEGER,
+                OBJECTS INTEGER,
+                APID TEXT,
+                BITPIX TEXT,
+                BLANK TEXT,
+                CHECKSUM TEXT,
+                COMMENT TEXT,
+                COMPRESS TEXT,
+                COMP_RAT TEXT,
+                CREATOR TEXT,
+                DATAMAX TEXT,
+                DATAMIN TEXT,
+                DATASUM TEXT,
+                EXTEND TEXT,
+                FILE_RAW TEXT,
+                HISTORY TEXT,
+                INSTRUME TEXT,
+                LEVEL TEXT,
+                LONGSTRN TEXT,
+                NAXIS TEXT,
+                NAXIS1 TEXT,
+                NAXIS2 TEXT,
+                OBT_BEG TEXT,
+                OBT_END TEXT,
+                ORIGIN TEXT,
+                SIMPLE TEXT,
+                VERSION TEXT,
+                VERS_SW TEXT,
+                UNIQUE(LTP, STP, FILENAME)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS failed_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                LTP TEXT,
+                STP TEXT,
+                FILENAME TEXT,
+                ERROR TEXT
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_processed_fits_key
+            ON processed_fits (LTP, STP, FILENAME)
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_psfs_key
+            ON psfs (LTP, STP, FILENAME)
+        """)
 
 
+def init_hdf5_regions(h5_path, crop_shape, dtype=np.float32):
+    with h5py.File(h5_path, "a") as h5f:
+        if "regions" not in h5f:
+            h5f.create_dataset(
+                "regions",
+                shape=(0, crop_shape[0], crop_shape[1]),
+                maxshape=(None, crop_shape[0], crop_shape[1]),
+                dtype=dtype,
+                chunks=(256, crop_shape[0], crop_shape[1]),
+                compression="gzip"
+            )
 
-def image_slicer(image, size, overlapping_size = 3):
+
+def append_regions_to_hdf5(h5_path, rows):
+    if not rows:
+        return rows
+
+    regions = np.stack([row["REGION"] for row in rows]).astype(np.float32)
+
+    with h5py.File(h5_path, "a") as h5f:
+        ds = h5f["regions"]
+        start_idx = ds.shape[0]
+        n_new = regions.shape[0]
+        ds.resize(start_idx + n_new, axis=0)
+        ds[start_idx:start_idx + n_new] = regions
+
+    for i, row in enumerate(rows):
+        row["REGION_ID"] = start_idx + i
+        del row["REGION"]
+
+    return rows
+
+
+def load_region(h5_path, region_id):
+    with h5py.File(h5_path, "r") as h5f:
+        return h5f["regions"][region_id]
+
+
+def save_peaks_to_sql(rows, conn):
+    if not rows:
+        return
+
+    values = [
+        (
+            row["LTP"],
+            row["STP"],
+            row["IDX"],
+            row["PEAK_VAL"],
+            row["X_COORD"],
+            row["Y_COORD"],
+            row["PRE_LABEL"],
+            row["INFO"],
+            row["REGION_ID"],
+            row["FILENAME"]
+        )
+        for row in rows
+    ]
+
+    conn.executemany("""
+        INSERT INTO psfs (
+            LTP, STP, IDX, PEAK_VAL, X_COORD, Y_COORD,
+            PRE_LABEL, INFO, REGION_ID, FILENAME
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, values)
+
+
+def save_processed_fits(conn, headers, ltp, stp, idx, timestamp, n_stars, n_objects):
+    row = {
+        "LTP": ltp,
+        "STP": stp,
+        "IDX": idx,
+        "TIMESTAMP": str(timestamp),
+        "FILENAME": str(headers.get("FILENAME", "")),
+        "STARS": int(n_stars),
+        "OBJECTS": int(n_objects),
+        "APID": str(headers.get("APID", "")),
+        "BITPIX": str(headers.get("BITPIX", "")),
+        "BLANK": str(headers.get("BLANK", "")),
+        "CHECKSUM": str(headers.get("CHECKSUM", "")),
+        "COMMENT": str(headers.get("COMMENT", "")),
+        "COMPRESS": str(headers.get("COMPRESS", "")),
+        "COMP_RAT": str(headers.get("COMP_RAT", "")),
+        "CREATOR": str(headers.get("CREATOR", "")),
+        "DATAMAX": str(headers.get("DATAMAX", "")),
+        "DATAMIN": str(headers.get("DATAMIN", "")),
+        "DATASUM": str(headers.get("DATASUM", "")),
+        "EXTEND": str(headers.get("EXTEND", "")),
+        "FILE_RAW": str(headers.get("FILE_RAW", "")),
+        "HISTORY": str(headers.get("HISTORY", "")),
+        "INSTRUME": str(headers.get("INSTRUME", "")),
+        "LEVEL": str(headers.get("LEVEL", "")),
+        "LONGSTRN": str(headers.get("LONGSTRN", "")),
+        "NAXIS": str(headers.get("NAXIS", "")),
+        "NAXIS1": str(headers.get("NAXIS1", "")),
+        "NAXIS2": str(headers.get("NAXIS2", "")),
+        "OBT_BEG": str(headers.get("OBT_BEG", "")),
+        "OBT_END": str(headers.get("OBT_END", "")),
+        "ORIGIN": str(headers.get("ORIGIN", "")),
+        "SIMPLE": str(headers.get("SIMPLE", "")),
+        "VERSION": str(headers.get("VERSION", "")),
+        "VERS_SW": str(headers.get("VERS_SW", "")),
+    }
+
+    pd.DataFrame([row]).to_sql("processed_fits", conn, if_exists="append", index=False)
+
+
+def already_processed(conn, ltp, stp, filename):
+    cur = conn.execute("""
+        SELECT 1
+        FROM processed_fits
+        WHERE LTP = ? AND STP = ? AND FILENAME = ?
+        LIMIT 1
+    """, (ltp, stp, filename))
+    return cur.fetchone() is not None
+
+
+def save_failed_file(conn, ltp, stp, filename, error_msg):
+    conn.execute("""
+        INSERT INTO failed_files (LTP, STP, FILENAME, ERROR)
+        VALUES (?, ?, ?, ?)
+    """, (ltp, stp, filename, str(error_msg)))
+
+
+def image_slicer(image, size, overlapping_size=3):
     """
     Slice a 2D-numpy array into several symmetrical regions that may share borders
     with its neighbors.
-
-
-    Args:
-        image (array): .fits image.
-        size (int): size of the proposal region.
-        overlapping (int): indicate length of share region (overlapping).
-
-    Return:
-        proposal_regions (list): list with proposed regions.
-        proposal_coordinates (list): list with the coordinates from the original image.
-
     """
 
-    # Extract size of image.
     size_x, size_y = image.shape
-    # Create grid for storing positions
 
-   
-    image_coordinates = np.zeros((size_x,size_y), dtype=object)
+    image_coordinates = np.zeros((size_x, size_y), dtype=object)
     size_x_vals = np.arange(size_x)
     size_y_vals = np.arange(size_y)
 
@@ -70,512 +234,423 @@ def image_slicer(image, size, overlapping_size = 3):
         for idy, valy in enumerate(size_y_vals):
             image_coordinates[idx, idy] = [valx, valy]
 
-    # Add padding for obtaining uniform regions.
-    n_regionsx = math.ceil(size_x/size)
-    n_regionsy = math.ceil(size_y/size)
+    n_regionsx = math.ceil(size_x / size)
+    n_regionsy = math.ceil(size_y / size)
 
-    padding_x = (n_regionsx*size - size_x)/2
-    padding_y = (n_regionsy*size - size_y)/2
+    padding_x = (n_regionsx * size - size_x) / 2
+    padding_y = (n_regionsy * size - size_y) / 2
 
-    # Add "False" padding to the borders of the image. If padding is even, then it is symmetrical.
-    image = np.pad(image, [(math.ceil(padding_x), math.floor(padding_x) + overlapping_size),
-                           (math.ceil(padding_y), math.floor(padding_y) + overlapping_size)],
-                           constant_values=0)
-    image_coordinates = np.pad(image_coordinates, [(math.ceil(padding_x), math.floor(padding_x)+ overlapping_size),
-                           (math.ceil(padding_y), math.floor(padding_y) + overlapping_size)],
-                           constant_values=0)
-    
+    image = np.pad(
+        image,
+        [
+            (math.ceil(padding_x), math.floor(padding_x) + overlapping_size),
+            (math.ceil(padding_y), math.floor(padding_y) + overlapping_size),
+        ],
+        constant_values=0,
+    )
+
+    image_coordinates = np.pad(
+        image_coordinates,
+        [
+            (math.ceil(padding_x), math.floor(padding_x) + overlapping_size),
+            (math.ceil(padding_y), math.floor(padding_y) + overlapping_size),
+        ],
+        constant_values=0,
+    )
+
     size_x, size_y = image.shape
 
-    # Create list for storing proposals and its corresponding coordinates
     proposal_regions = []
     proposal_coordinates = []
 
-    # Crop symmetrical regions of size sizeXsize and store them into a list.
-    for i in range(int(size_x/size)):
-        for j in range(int(size_y/size)):
-            proposal_regions.append(image[i*size:(i+1)*size + overlapping_size, j*size:(j+1)*size+overlapping_size])
-            proposal_coordinates.append(image_coordinates[i*size:(i+1)*size + overlapping_size, j*size:(j+1)*size+overlapping_size])
-
+    for i in range(int(size_x / size)):
+        for j in range(int(size_y / size)):
+            proposal_regions.append(
+                image[i * size:(i + 1) * size + overlapping_size,
+                      j * size:(j + 1) * size + overlapping_size]
+            )
+            proposal_coordinates.append(
+                image_coordinates[i * size:(i + 1) * size + overlapping_size,
+                                  j * size:(j + 1) * size + overlapping_size]
+            )
 
     return proposal_regions, proposal_coordinates
+
 
 def create_coordinates(size_x, size_y):
     """
     Create coordinate matrix made of pairs that represents the position of the value in the grid.
-
-    Parameters:
-        size_x (int): size in x dimension.
-        size_y (int): size in y dimension.
-    
-    Returns:
-        grid (array): 2D grid with ij coordinates as elements.
-
     """
-
-    # Create array with indexes of a given image.
     X = np.arange(size_x)
     Y = np.arange(size_y)
-
-    # Create meshgrid
     Xmsh, Ymsh = np.meshgrid(X, Y)
-    
-    # Merge values
     pairs = np.stack((Xmsh, Ymsh), axis=-1)
     return pairs
 
 
-def statistics_region(region, sigma = 3.0):
+def statistics_region(region, sigma=3.0):
     """
     Create a mask for 0 values in a region and compute statistics.
-
-    Parameters:
-    
-        region (2d array): region to be masked and analyzed.
-        sigma (float): sigma value for statistics.
-    
-    Return:
-        mask (2d array): mask for peak detection.
-        std (float): standard deviation of region.
-        median (float): median of the data.
     """
-    
-    # Create mask for 0-valued items in the region.
     mask = region == 0
-    # Compute statistics.
-    mean, median, std = sigma_clipped_stats(region[~mask], sigma=3.0)
+    valid = region[~mask]
 
-    return mask, std, median
+    if valid.size == 0:
+        return mask, 0.0, 0.0
 
+    mean, median, std = sigma_clipped_stats(valid, sigma=sigma)
+    return mask, float(std), float(median)
 
-import warnings
-
-# Suppress all warnings
-warnings.filterwarnings("ignore")
-
-def peak_detector_main(ltp, stp, id, image, coordinates, coeff, full_image, lim, size, filename):
-    """
-    Detect points-of-interest in a 2d-array.
-
-    Parameters:
-        image (2d-array): image where points-of-interest may be found.
-        coordinates (2d-array): real coordinates of the proposal region.
-        coeff (int): coefficient for threshold in find_peaks.
-    
-    Return:
-        points_of_interest (dataframe): dataframe with the detected points.
-    """
-    # Generate dataframe
-    # Extract size
-    pd_df = pd.DataFrame( columns= ["LTP", "STP", "IDX", "PEAK_VAL", "X_COORD", "Y_COORD",
-                                     "PRE_LABEL", "INFO", "REGION", "FILENAME"])
-    size= image[0].shape[0]
-
-    # Open all proposed regions and read one by one.
-    for n_reg, reg in enumerate(image):
-    
-        # Create mask and compute statistics
-        masked, std, median = statistics_region(reg)
-        # Start peak detection.
-        points = find_peaks(reg-median, threshold=coeff*std, box_size=size/2, 
-                           npeaks=1, mask=masked)
-    
-        # Check for obtained values
-        if points:
-            # Iterate all over the rows in the detected points dataframe                
-                real_pos = coordinates[n_reg][int(points["y_peak"]), int(points["x_peak"])]
-
-                if len(get_iterable(real_pos)) == 2:
-                    pd_df.loc[len(pd_df)] = [ltp, stp, id, points["peak_value"][0]+median, real_pos[1],
-                                              real_pos[0], "object", "info", cropped_region(full_image, real_pos[1], real_pos[0], lim),
-                                              filename]
-                
-    return pd_df     
 
 def cropped_region(image, x_pos, y_pos, lim):
     """
     Crop a small region from a given image. If coordinates are near boundaries, generate zero padding.
-
-    Parameters:
-        image (2d-array): .fits image with data.
-        x_pos (int): x-coordinate with an identified object.
-        y_pos (int): y-coordinate with an identified object.
-        lim (int): radius of cropped region.
-
-    Output:
-        cropped_image (2d-array): cropped region from .fits image.
     """
-
-    # Extract size of the image.
     H, W = image.shape
-    # Calculate final size of the cropped region.
     crop_size = 2 * lim + 1
 
-    # Generate cropping boundaries.
-    # Add +1 factor in the cropped region so xy coordinates are in the center of the image.
     y_min = max(y_pos - lim, 0)
     y_max = min(y_pos + lim + 1, H)
     x_min = max(x_pos - lim, 0)
     x_max = min(x_pos + lim + 1, W)
 
-    # Generate cropped image.
-    # As coordinates are in x-y cartesian plane, for converting them into indexes, flip them.
     cropped = image[y_min:y_max, x_min:x_max]
 
-    # Check if image is in-boundaries.
     if cropped.shape[0] == crop_size and cropped.shape[1] == crop_size:
         return cropped
-    
-    # If not, apply zero padding by generating a new image.
+
     padded_crop = np.zeros((crop_size, crop_size), dtype=image.dtype)
 
-    # Determine placement in the zero-padded array
     pad_y_start = max(lim - y_pos, 0)
     pad_y_end = pad_y_start + (y_max - y_min)
     pad_x_start = max(lim - x_pos, 0)
     pad_x_end = pad_x_start + (x_max - x_min)
 
-    # Sum up both regions.
     padded_crop[pad_y_start:pad_y_end, pad_x_start:pad_x_end] = cropped
-
     return padded_crop
 
 
-def crop_star_position(ltp, stp, id, df, star_df, image, lim):
+def peak_detector_main(ltp, stp, id, image, coordinates, coeff, full_image, lim, size, filename):
+    """
+    Detect points-of-interest in a 2d-array using find_peaks.
+    Returns a list of dictionaries.
+    """
+    rows = []
+    region_size = image[0].shape[0]
+
+    for n_reg, reg in enumerate(image):
+        masked, std, median = statistics_region(reg)
+
+        if std <= 0:
+            continue
+
+        points = find_peaks(
+            reg - median,
+            threshold=coeff * std,
+            box_size=max(1, region_size // 2),
+            npeaks=1,
+            mask=masked
+        )
+
+        if points is not None and len(points) > 0:
+            real_pos = coordinates[n_reg][int(points["y_peak"][0]), int(points["x_peak"][0])]
+
+            if len(get_iterable(real_pos)) == 2:
+                rows.append({
+                    "LTP": ltp,
+                    "STP": stp,
+                    "IDX": id,
+                    "PEAK_VAL": float(points["peak_value"][0] + median),
+                    "X_COORD": int(real_pos[1]),
+                    "Y_COORD": int(real_pos[0]),
+                    "PRE_LABEL": "object",
+                    "INFO": "info",
+                    "REGION": cropped_region(full_image, real_pos[1], real_pos[0], lim),
+                    "FILENAME": filename
+                })
+
+    return rows
+
+
+def peak_detector_main_DAOS(ltp, stp, id, image, coordinates, coeff, full_image, lim, size, filename):
+    """
+    Detect point-like sources in a 2D array using DAOStarFinder.
+    Returns a list of dictionaries.
+    """
+    rows = []
+    fwhm = 2.0
+
+    for n_reg, reg in enumerate(image):
+        masked, std, median = statistics_region(reg)
+
+        if std <= 0:
+            continue
+
+        data = reg - median
+
+        finder = DAOStarFinder(
+            threshold=coeff * std,
+            fwhm=fwhm,
+            exclude_border=False
+        )
+
+        sources = finder(data, mask=masked)
+
+        if sources is None or len(sources) == 0:
+            continue
+
+        brightest_idx = np.argmax(sources["peak"])
+        src = sources[brightest_idx]
+
+        x = int(round(src["xcentroid"]))
+        y = int(round(src["ycentroid"]))
+
+        if x < 0 or y < 0 or y >= reg.shape[0] or x >= reg.shape[1]:
+            continue
+
+        real_pos = coordinates[n_reg][y, x]
+
+        if len(get_iterable(real_pos)) == 2:
+            rows.append({
+                "LTP": ltp,
+                "STP": stp,
+                "IDX": id,
+                "PEAK_VAL": float(src["peak"] + median),
+                "X_COORD": int(real_pos[1]),
+                "Y_COORD": int(real_pos[0]),
+                "PRE_LABEL": "object",
+                "INFO": "info",
+                "REGION": cropped_region(full_image, real_pos[1], real_pos[0], lim),
+                "FILENAME": filename
+            })
+
+    return rows
+
+
+def crop_star_position(ltp, stp, id, df, star_df, image, lim, filename=""):
     """
     Crop an area where a star is supposed to be located.
-
-    Parameters:
-        df (pandas): pandas dataframe with detected objects.
-        star_df (pandas): pandas dataframe with star position.
-        image (2d-array): .fits image.
-        lim (int): size of the cropped image.
-    
-    Output:
-        updated_df (pandas): updated dataframe with added star images.
+    This helper keeps the old DataFrame style in case you still need it elsewhere.
     """
-    # Iterate over stars.
     for ids in range(len(star_df)):
-        # Create region with star.
         x = int(star_df["xsensor"].iloc[ids])
         y = int(star_df["ysensor"].iloc[ids])
-        cropped = cropped_region(image, x , y, lim )
-        df.loc[len(df)] = [ltp, stp, id, image[y,x], x, y, "star", "non detected", cropped ]
-    
+        cropped = cropped_region(image, x, y, lim)
+        df.loc[len(df)] = [ltp, stp, id, image[y, x], x, y, "star", "non detected", cropped, filename]
+
     return df
 
 
-### OBJECT PRE-CLASSIFICATION ###
-
 def star_comparison(dataframe, star_catalogue):
     """
-    Check if a found object is a previously detected star by computing the euclidean distance between
-    both points.
-    
-    Parameters:
-        dataframe (table): astropy table with detected peaks.
-        star_catalogue (table): astropy table with detected stars.
-    
+    Check if a found object is a previously detected star by computing the euclidean distance.
     """
-    # Extract coordinates from the detected object.
     values = len(dataframe)
-    for idx in range(values):
 
+    for idx in range(values):
         x1 = dataframe["X_COORD"].iloc[idx]
         y1 = dataframe["Y_COORD"].iloc[idx]
 
-        # Run for all detected stars in star_catalogue.
-
         for ids in range(len(star_catalogue)):
-            # Extract star position.
-            x2, y2 = star_catalogue["xsensor"].iloc[ids], star_catalogue["ysensor"].iloc[ids]
-            # Compute euclidean distance.
-            dist = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+            x2 = star_catalogue["xsensor"].iloc[ids]
+            y2 = star_catalogue["ysensor"].iloc[ids]
+            dist = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
             if dist < 10:
-                dataframe["PRE_LABEL"].iloc[idx] = "star"
-                dataframe["INFO"].iloc[idx] = str(star_catalogue["MAIN_ID"].iloc[ids])
-        
+                dataframe.loc[dataframe.index[idx], "PRE_LABEL"] = "star"
+                dataframe.loc[dataframe.index[idx], "INFO"] = str(star_catalogue["MAIN_ID"].iloc[ids])
 
     return dataframe, star_catalogue
 
 
-def remove_similar_objects(pandas_df, threshold = 5):
+def remove_similar_objects(pandas_df, threshold=5):
     """
-    Given a pandas dataframe with detected objects, remove the duplicated ones.
-
-    Parameters:
-        pandas_df (dataframe): dataframe with object position and peak value.
-        threshold (int): pixel distance between two objects for being considered same object.
-    Return:
-        cleaned_df (dataframe): cleaned dataframe with no duplicates.
+    Given a pandas dataframe with detected objects, remove duplicated ones.
     """
+    if len(pandas_df) <= 1:
+        return pandas_df
 
-    # Create an array from 0 to size of dataframe.
     elements = np.arange(len(pandas_df))
-    pairs = []
-
-    # Create non repetitive pairs of indexes.
-    for x, y in itertools.combinations(elements, 2):
-        pairs.append([x,y])
-
-    # Create list for duplicated elements
     remove_indexes = []
 
-    # Iterate all over the pairs generated
-    for pair in pairs:
-        px, py = pair[0], pair[1]
-        # Compute euclidean distance of detected objects
-        y = (pandas_df["Y_COORD"].iloc[px] - pandas_df["Y_COORD"].iloc[py])**2
-        x = (pandas_df["X_COORD"].iloc[px] - pandas_df["X_COORD"].iloc[py])**2
-        dist = np.sqrt(y+x)
-        # Store the index object whose peak was lower.
+    for px, py in itertools.combinations(elements, 2):
+        y = (pandas_df["Y_COORD"].iloc[px] - pandas_df["Y_COORD"].iloc[py]) ** 2
+        x = (pandas_df["X_COORD"].iloc[px] - pandas_df["X_COORD"].iloc[py]) ** 2
+        dist = np.sqrt(y + x)
+
         if dist < threshold:
-            index = [px if pandas_df["PEAK_VAL"].iloc[px] < pandas_df["PEAK_VAL"].iloc[py] else py]
-            # Store index.
-            remove_indexes.append(pandas_df.iloc[index[0]].name)
+            index = px if pandas_df["PEAK_VAL"].iloc[px] < pandas_df["PEAK_VAL"].iloc[py] else py
+            remove_indexes.append(pandas_df.iloc[index].name)
 
-    # Remove repeated objec with lowest peak value.
     pandas_df = pandas_df.drop(remove_indexes)
+    pandas_df = pandas_df.reset_index(drop=True)
+    return pandas_df
 
-    return pandas_df    
 
-def points_inside_fov(x, y, center, scale, factor = 0.1):
+def points_inside_fov(x, y, center, scale, factor=0.1):
     """
     Remove objects whose coordinates are outside metis detection region.
-
-    Parameters:
-        x (float): x coordinate of the detected object.
-        y (float): y coordinate of the detected object.
-        center (list): x, y coordinate of the metis center POV.
-        scale (float): scale factor for matching FOV limits with the image.
-        factor (float): multiplication factor for tunning up FOV limit.
-
-    Return:
-        (bool): True if detected object falls in new region.
     """
+    radius1 = (sf.METIS_fov_min + factor) / scale
+    radius2 = (sf.METIS_fov - factor) / scale
 
-    # Metis FOV.
-    radius1 = (sf.METIS_fov_min + factor)/scale
-    radius2 = (sf.METIS_fov - factor)/scale
-
-    # Check if object is outside first boundary.
-    outside_first = (x - center[0])**2 + (y - center[1])**2 >= radius1**2
-    # Check if object is inside second boundary.
-    inside_second = (x - center[0])**2 + (y - center[1])**2 <= radius2**2
+    outside_first = (x - center[0]) ** 2 + (y - center[1]) ** 2 >= radius1 ** 2
+    inside_second = (x - center[0]) ** 2 + (y - center[1]) ** 2 <= radius2 ** 2
 
     return outside_first and inside_second
+
 
 def remove_objects_fov(df, center, scale):
     """
     Remove objects that are outside METIS FOV.
-
-    Parameters:
-        df (pandas): dataframe with stars
-        center (list): x, y coordinate of FOV center
-        scale (float): scale.
-
-    Return:
-        df (pandas): filtered dataframe.
     """
     vals = []
 
-    for i in range(len(df)):  
+    for i in range(len(df)):
         x = df["X_COORD"].iloc[i]
         y = df["Y_COORD"].iloc[i]
         accept = points_inside_fov(x, y, center, scale)
 
         if not accept:
-            vals.append(df.index[i])  
+            vals.append(df.index[i])
 
-    df = df.drop(vals)  
+    df = df.drop(vals)
+    df = df.reset_index(drop=True)
     return df
 
-def checkpoint_status(csv_file, csv_folder):
+
+def folder_reader(metis_folder, output_folder,
+                  KERNEL_PATH, KERNEL_NAME, magnitude, uv, catalog,
+                  size, overlapping, std, lim, filter="vl-image",
+                  db_name="psf_metadata_hdf5.db",
+                  h5_name="regions.h5"):
     """
-    Check if a previously .csv exists. If so, extract the LTP, STP and FN from the
-    last checked file. 
-
-    Parameters:
-        csv_file (str): name of the .csv file to check.
-    
-    Output:
-        checkpoint (list): LTP, STP, FN from last checked FITS.
-    """
-    
-    # Retrieve files names in folder.
-    files_list = os.listdir(csv_folder)
-    checkpoint = []
-    # Check files.
-    if csv_file in files_list:
-        file = pd.read_pickle(csv_file)
-        # Store info into list.
-        checkpoint.append(file["LTP"].iloc[-1])
-        checkpoint.append(file["STP"].iloc[-1])
-        checkpoint.append(file["IDX"].iloc[-1])
-    else:
-
-        checkpoint = False
-    
-    return checkpoint
-
-def folder_reader(csvs_fail, pkl_fits, pkl_obj, metis_folder, pkls_folder,
-                  KERNEL_PATH, KERNEL_NAME, magnitude,uv, catalog,
-                  size, overlapping, std, lim, filter = "vl-image"
-                  ):
-    """"
-    Extract point-of-interest in a given set of L0 images. 
-
+    Extract point-of-interest in a given set of L0 images and save:
+    - metadata to SQLite
+    - cropped regions to HDF5
     """
 
-    # Normal structure of a LO FITS file.
-    headers_fits = ['APID', 'BITPIX', 'BLANK', 'CHECKSUM', 'COMMENT', 'COMPRESS',
-       'COMP_RAT', 'CREATOR', 'DATAMAX', 'DATAMIN', 'DATASUM', 'EXTEND',
-       'FILENAME', 'FILE_RAW', 'HISTORY', 'INSTRUME', 'LEVEL', 'LONGSTRN',
-       'NAXIS', 'NAXIS1', 'NAXIS2', 'OBT_BEG', 'OBT_END', 'ORIGIN', 'SIMPLE',
-       'VERSION', 'VERS_SW']
+    DAOS = False
 
-    ### DATA LOADING ###
-    # Define full paths for savind data.
-    obj_path = os.path.join(pkls_folder, pkl_obj)
-    fits_path = os.path.join(pkls_folder, pkl_fits)
-    csvf_path = os.path.join(pkls_folder, csvs_fail)
+    sqlite_path = os.path.join(output_folder, db_name)
+    h5_path = os.path.join(output_folder, h5_name)
 
-
-    # Check if there is already a previous pickle file.
-    checkpoints = checkpoint_status(pkl_fits, pkls_folder)
-
-    # SQL APPROACH.
-    sqlite_path = os.path.join(pkls_folder, "psf_metadata.db")
     init_sqlite_db(sqlite_path)
 
+    crop_size = 2 * lim + 1
+    init_hdf5_regions(h5_path, (crop_size, crop_size), dtype=np.float32)
 
-    # If it is first run, create the pickle files with their corresponding headers.
-    if not checkpoints:
-        # Create file for fits.
-        fits_file_pkl = pd.DataFrame(columns = headers_fits + ["LTP", "STP", "IDX",
-                                                               "TIMESTAMP", "STARS", "OBJECTS"])
+    conn = sqlite3.connect(sqlite_path)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
 
-        # Create file for object detection.
-        objs_file_pkl = pd.DataFrame(columns = ["LTP", "STP", "IDX",
-                                                 "PEAK_VAL", "X_COORD", "Y_COORD",
-                                                   "PRE_LABEL", "INFO", "REGION",
-                                                   "FILENAME"])
+    try:
+        LTPs_folder = ut.sorter(get_iterable(os.listdir(metis_folder)))
+        processed_counter = 0
 
-        # Save DFs into pickle for preserving array structure.
-        fits_file_pkl.to_pickle(fits_path)
-        objs_file_pkl.to_pickle(obj_path)
-        id_ck = -1
-    
-    # If pkl_fits already exist, then extract the LTP, STP, ID from the last analyzed file.
-    else:
-        ltp_ck, stp_ck, id_ck = checkpoints
+        for ltp_folder in LTPs_folder:
+            print(f"Starting analysis with: {ltp_folder}")
 
-    # Load pickles files
-    fits_file_pkl = pd.read_pickle(fits_path)
-    objs_file_pkl = pd.read_pickle(obj_path)
+            stp_dir = os.path.join(metis_folder, ltp_folder)
+            STPs_folder = ut.sorter(get_iterable(os.listdir(stp_dir)))
 
-    ### FOLDER ITERATION ###
-    
-    # Extract folder with LTPs.
-    LTPs_folder = ut.sorter(get_iterable(os.listdir(metis_folder)))
+            for stp_folder in STPs_folder:
+                print(f"\t{stp_folder}")
 
-    # Load checkpoint for LTP.
-    if checkpoints:
-        LTPs_folder = LTPs_folder[LTPs_folder.index(ltp_ck):]
+                fits_dir = os.path.join(metis_folder, ltp_folder, stp_folder)
+                fits_folder = sorted(get_iterable(os.listdir(fits_dir)))
+                fits_folder = [file for file in fits_folder if filter in file]
 
-    # Iterate in all the LTP folders.
-    for ltp_folder in LTPs_folder:
-        print(f"Starting analysis with: {ltp_folder}") 
+                if not fits_folder:
+                    continue
 
-        # Extract folder with STPs.
-        STPs_folder = ut.sorter(get_iterable(os.listdir(os.path.join(metis_folder, ltp_folder))))
-        
-        
-        # Load checkpoint in STP.
-        if checkpoints:
-            STPs_folder = STPs_folder[STPs_folder.index(stp_ck):]
+                for idx, fits_file in enumerate(fits_folder):
+                    print(f"\t\tFile {idx}: {fits_file}")
 
-        # Iterate in all the STP folders.
-        for stp_folder in STPs_folder:
-            print(f"\t {stp_folder}") 
+                    if already_processed(conn, ltp_folder, stp_folder, fits_file):
+                        print(f"\t\tSkipping already processed file: {fits_file}")
+                        continue
 
-            # Extract files in each folder.
-            fits_folder = sorted(get_iterable(os.listdir(os.path.join(metis_folder, ltp_folder, stp_folder))))
-            # Apply filter.
-            fits_folder = [file for file in fits_folder if filter in file]
+                    try:
+                        full_path = os.path.join(fits_dir, fits_file)
 
-            
-            if checkpoints:
-                # Load checkpoint in FITSs.
-                fits_folder = fits_folder[id_ck + 1 :]
-        
-            ### DEACTIVATE CHECKPOINT ###
-                checkpoints = False
-            
-            ### FITS ANALYSIS AND OBJECT DETECTION ###
+                        timestamp, headers, image = ut.fits_loader(full_path)
 
-            if not fits_folder:
-                continue
+                        stars_detected, et, scale, center = sf.star_detector_offline(
+                            KERNEL_NAME, KERNEL_PATH, timestamp, uv, catalog, magnitude
+                        )
 
-            for id, fits_file in enumerate(fits_folder):
-                print(f"\t\t File {id}")
+                        timestamp = sf.et2utc(et)
 
-                try: 
-                    ## STAR DETECTION ##
+                        regions, coordinates = image_slicer(image, size, overlapping)
 
-                    # Extract timestamp, headers and the image of every .fits file
-                    timestamp, headers, image = ut.fits_loader(os.path.join(metis_folder, ltp_folder, stp_folder, fits_file))
-                    # Retrieve star position.
-                    stars_detected, et, scale, center = sf.star_detector_offline(KERNEL_NAME, KERNEL_PATH, timestamp, uv, catalog, magnitude)
-                    # Compute UTC_TIME.
-                    timestamp = sf.et2utc(et)
+                        if DAOS:
+                            peaks_rows = peak_detector_main_DAOS(
+                                ltp_folder,
+                                stp_folder,
+                                idx,
+                                regions,
+                                coordinates,
+                                std,
+                                image,
+                                lim,
+                                size,
+                                headers.get("FILENAME", fits_file)
+                            )
+                        else:
+                            peaks_rows = peak_detector_main(
+                                ltp_folder,
+                                stp_folder,
+                                idx,
+                                regions,
+                                coordinates,
+                                std,
+                                image,
+                                lim,
+                                size,
+                                headers.get("FILENAME", fits_file)
+                            )
 
+                        peaks = pd.DataFrame(peaks_rows)
 
-                    ## OBJECT DETECTION ##
+                        if len(peaks) > 0 and len(stars_detected) > 0:
+                            peaks, _ = star_comparison(peaks, stars_detected)
 
-                    # Split image into several proposal regions.
-                    regions, coordinates = image_slicer(image, size, overlapping)
-                    # Search possible peaks given a threshold.
-                    peaks = peak_detector_main(ltp_folder, stp_folder, id, regions, coordinates, std, image, lim, size, headers["FILENAME"])
+                        if len(peaks) > 0:
+                            peaks = remove_similar_objects(peaks, 5)
+                            peaks = remove_objects_fov(peaks, center, scale)
 
-                    ## OBJECT PRE-LABELING ##
+                        if len(peaks) > 0:
+                            peaks_rows = peaks.to_dict(orient="records")
+                            peaks_rows = append_regions_to_hdf5(h5_path, peaks_rows)
+                            save_peaks_to_sql(peaks_rows, conn)
 
-                    # Check if stars are found.
-                    if len(stars_detected)>0:
-                        peaks, stars_remained = star_comparison(peaks, stars_detected)
+                        n_stars = len(peaks[peaks["PRE_LABEL"] == "star"]) if len(peaks) > 0 else 0
+                        n_objects = len(peaks[peaks["PRE_LABEL"] == "object"]) if len(peaks) > 0 else 0
 
-                    # Remove similar objects.
-                    peaks = remove_similar_objects(peaks, 5)
-                    # Remove peaks outside metis foc
-                    peaks = remove_objects_fov(peaks, center, scale)
+                        save_processed_fits(
+                            conn=conn,
+                            headers=headers,
+                            ltp=ltp_folder,
+                            stp=stp_folder,
+                            idx=idx,
+                            timestamp=timestamp,
+                            n_stars=n_stars,
+                            n_objects=n_objects
+                        )
 
+                        processed_counter += 1
 
-                    ## DATA SAVING ##
+                        if processed_counter % 20 == 0:
+                            conn.commit()
+                            print(f"\t\tCommitted after {processed_counter} processed FITS files.")
 
-                    # NORMAL APPROACH: Merge and save data in objects file. 
-                    #objs_file_pkl = pd.concat([objs_file_pkl, peaks])
-                    #objs_file_pkl.to_pickle(obj_path)
+                    except Exception as e:
+                        save_failed_file(conn, ltp_folder, stp_folder, fits_file, e)
+                        conn.commit()
+                        print(f"\t\tError processing {fits_file}: {e}")
 
-                    # SQL APPROACH: Use databases to store metadata and store
-                    # each PSFs as separated file.
-                    save_peaks_to_sql(peaks, sqlite_path)
+        conn.commit()
 
-
-
-
-                    # Append data in fits file.
-                    headers = pd.DataFrame([headers])
-                    headers_extra = pd.DataFrame([[ltp_folder, stp_folder, id,
-                                                                        timestamp, len(peaks[peaks["PRE_LABEL"] =="star"]) ,
-                                                                        len(peaks[peaks["PRE_LABEL"] =="object"])]], columns= ["LTP", "STP", "IDX",
-                                                               "TIMESTAMP", "STARS", "OBJECTS"])
-        
-                    fits_file_pkl.loc[len(fits_file_pkl)] = pd.concat([headers, headers_extra], axis = 1).iloc[0]
-                    fits_file_pkl.to_pickle(fits_path)
-
-                except Exception as e:
-                    with open(csvf_path, "a") as f:
-                        writer = csv.writer(f)
-                        writer.writerow([ltp_folder, stp_folder, fits_file, str(e)])
-
-
+    finally:
+        conn.close()

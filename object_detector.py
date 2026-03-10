@@ -1,25 +1,16 @@
 import libraries.object_detection as od
 from libraries.starcatalogs import StarCatalog
 import libraries.starfunctions as sf
-import csv
 
-"""------PARAMETERS FOR DATA LOADING------""" 
-# Path to the metis_folder.
+"""------PARAMETERS FOR DATA LOADING------"""
+# Path to the metis folder.
 DATA_DIR = "/home/stefano98/University of Padua/thesis/Packages/METIS-Object-Detection/metis_vis"
 
-# Path to write .csvs
-CSV_DIR = "/home/stefano98/University of Padua/thesis/Packages/METIS-Object-Detection"
+# Path where the SQLite database will be written.
+OUTPUT_DIR = "/home/stefano98/University of Padua/thesis/Packages/METIS-Object-Detection"
 
-
-"""------PARAMETERS FOR DATA SAVING------"""
-# Name for fits saving file.
-CVS_FILE_FITS = "fits_files.pkl"
-
-# Name for object saving file.
-OBS_FILE = "objects_files.pkl"
-
-# Name for CSVs failed.
-CSV_FAILURES = "csv_failures.csv"
+# SQLite database filename.
+DB_NAME = "psf_metadata.db"
 
 
 """------STAR DETECTION PARAMETERS-------"""
@@ -34,27 +25,21 @@ UV = False
 MAX_MAG = 8
 
 # Catalog with stars.
-CAT = StarCatalog('Simbad')
+CAT = StarCatalog("Simbad")
+
 
 """------OBJECT DETECTION PARAMETERS------"""
 # Size for region proposal.
 BOX_SIZE = 30
+
 # Size for overlapping between regions.
 OVERLAPPING = 3
+
 # Threshold for peak finding.
-THRESHOLD = 9
-# Size for cropped region (total_size = LIM*2 +1)
-LIM = 30 
+THRESHOLD = 5
 
-
-"""------HEADERS FOR PICKLE FILES------"""
-
-
-# Additional headers to be created in the FITS_FILE.csv.
-HEADERS_TO_ADD = ["LTP", "STP", "IDX","TIMESTAMP", "STARS", "OBJECTS"]
-
-# Headers to create in the object detection .csv.
-HEADERS_OBJ = ["LTP", "STP", "IDX", "PEAK_VAL", "X_COORD", "Y_COORD", "PRE_LABEL", "INFO", "REGION"]
+# Size for cropped region (total_size = LIM*2 + 1)
+LIM = 30
 
 
 #### CODE RUNNING ####
@@ -63,7 +48,17 @@ HEADERS_OBJ = ["LTP", "STP", "IDX", "PEAK_VAL", "X_COORD", "Y_COORD", "PRE_LABEL
 spice = sf.load_kernel(KERNEL_NAME, KERNEL_PATH)
 
 # Run object detection.
-
-od.folder_reader(CSV_FAILURES, CVS_FILE_FITS, OBS_FILE, DATA_DIR, CSV_DIR,
-            KERNEL_PATH, KERNEL_NAME, MAX_MAG, UV, CAT, 
-              BOX_SIZE, OVERLAPPING, THRESHOLD, LIM)
+od.folder_reader(
+    DATA_DIR,
+    OUTPUT_DIR,
+    KERNEL_PATH,
+    KERNEL_NAME,
+    MAX_MAG,
+    UV,
+    CAT,
+    BOX_SIZE,
+    OVERLAPPING,
+    THRESHOLD,
+    LIM,
+    db_name=DB_NAME
+)
