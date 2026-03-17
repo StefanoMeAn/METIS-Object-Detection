@@ -10,7 +10,6 @@ import os
 import libraries.utilities as ut
 import sqlite3
 import warnings
-import h5py
 
 warnings.filterwarnings("ignore")
 
@@ -28,8 +27,11 @@ def init_sqlite_db(db_path):
                 Y_COORD INTEGER,
                 PRE_LABEL TEXT,
                 INFO TEXT,
-                REGION_ID INTEGER,
-                FILENAME TEXT
+                FILENAME TEXT,
+                REGION_BLOB BLOB,
+                REGION_SHAPE_Y INTEGER,
+                REGION_SHAPE_X INTEGER,
+                REGION_DTYPE TEXT
             )
         """)
 
@@ -94,50 +96,55 @@ def init_sqlite_db(db_path):
         """)
 
 
-def init_hdf5_regions(h5_path, crop_shape, dtype=np.float32):
-    with h5py.File(h5_path, "a") as h5f:
-        if "regions" not in h5f:
-            h5f.create_dataset(
-                "regions",
-                shape=(0, crop_shape[0], crop_shape[1]),
-                maxshape=(None, crop_shape[0], crop_shape[1]),
-                dtype=dtype,
-                chunks=(256, crop_shape[0], crop_shape[1]),
-                compression="gzip"
-            )
+def region_to_sql_fields(region):
+    """
+    Convert a numpy region into SQLite-storable fields.
+    """
+    region = np.asarray(region, dtype=np.float32)
+    return (
+        sqlite3.Binary(region.tobytes()),
+        int(region.shape[0]),
+        int(region.shape[1]),
+        str(region.dtype)
+    )
 
 
-def append_regions_to_hdf5(h5_path, rows):
-    if not rows:
-        return rows
+def load_region_from_row(region_blob, shape_y, shape_x, dtype):
+    """
+    Reconstruct a numpy array from SQLite row fields.
+    """
+    if region_blob is None:
+        return None
 
-    regions = np.stack([row["REGION"] for row in rows]).astype(np.float32)
-
-    with h5py.File(h5_path, "a") as h5f:
-        ds = h5f["regions"]
-        start_idx = ds.shape[0]
-        n_new = regions.shape[0]
-        ds.resize(start_idx + n_new, axis=0)
-        ds[start_idx:start_idx + n_new] = regions
-
-    for i, row in enumerate(rows):
-        row["REGION_ID"] = start_idx + i
-        del row["REGION"]
-
-    return rows
+    arr = np.frombuffer(region_blob, dtype=np.dtype(dtype))
+    return arr.reshape((shape_y, shape_x))
 
 
-def load_region(h5_path, region_id):
-    with h5py.File(h5_path, "r") as h5f:
-        return h5f["regions"][region_id]
+def load_region_by_id(conn, psf_id):
+    """
+    Load a region directly from the psfs table using the row id.
+    """
+    row = conn.execute("""
+        SELECT REGION_BLOB, REGION_SHAPE_Y, REGION_SHAPE_X, REGION_DTYPE
+        FROM psfs
+        WHERE id = ?
+    """, (psf_id,)).fetchone()
+
+    if row is None:
+        raise ValueError(f"No psfs row found with id={psf_id}")
+
+    return load_region_from_row(*row)
 
 
 def save_peaks_to_sql(rows, conn):
     if not rows:
         return
 
-    values = [
-        (
+    values = []
+    for row in rows:
+        region_blob, region_shape_y, region_shape_x, region_dtype = region_to_sql_fields(row["REGION"])
+
+        values.append((
             row["LTP"],
             row["STP"],
             row["IDX"],
@@ -146,18 +153,20 @@ def save_peaks_to_sql(rows, conn):
             row["Y_COORD"],
             row["PRE_LABEL"],
             row["INFO"],
-            row["REGION_ID"],
-            row["FILENAME"]
-        )
-        for row in rows
-    ]
+            row["FILENAME"],
+            region_blob,
+            region_shape_y,
+            region_shape_x,
+            region_dtype
+        ))
 
     conn.executemany("""
         INSERT INTO psfs (
             LTP, STP, IDX, PEAK_VAL, X_COORD, Y_COORD,
-            PRE_LABEL, INFO, REGION_ID, FILENAME
+            PRE_LABEL, INFO, FILENAME,
+            REGION_BLOB, REGION_SHAPE_Y, REGION_SHAPE_X, REGION_DTYPE
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, values)
 
 
@@ -278,9 +287,6 @@ def image_slicer(image, size, overlapping_size=3):
 
 
 def create_coordinates(size_x, size_y):
-    """
-    Create coordinate matrix made of pairs that represents the position of the value in the grid.
-    """
     X = np.arange(size_x)
     Y = np.arange(size_y)
     Xmsh, Ymsh = np.meshgrid(X, Y)
@@ -289,9 +295,6 @@ def create_coordinates(size_x, size_y):
 
 
 def statistics_region(region, sigma=3.0):
-    """
-    Create a mask for 0 values in a region and compute statistics.
-    """
     mask = region == 0
     valid = region[~mask]
 
@@ -303,9 +306,6 @@ def statistics_region(region, sigma=3.0):
 
 
 def cropped_region(image, x_pos, y_pos, lim):
-    """
-    Crop a small region from a given image. If coordinates are near boundaries, generate zero padding.
-    """
     H, W = image.shape
     crop_size = 2 * lim + 1
 
@@ -331,10 +331,6 @@ def cropped_region(image, x_pos, y_pos, lim):
 
 
 def peak_detector_main(ltp, stp, id, image, coordinates, coeff, full_image, lim, size, filename):
-    """
-    Detect points-of-interest in a 2d-array using find_peaks.
-    Returns a list of dictionaries.
-    """
     rows = []
     region_size = image[0].shape[0]
 
@@ -373,10 +369,6 @@ def peak_detector_main(ltp, stp, id, image, coordinates, coeff, full_image, lim,
 
 
 def peak_detector_main_DAOS(ltp, stp, id, image, coordinates, coeff, full_image, lim, size, filename):
-    """
-    Detect point-like sources in a 2D array using DAOStarFinder.
-    Returns a list of dictionaries.
-    """
     rows = []
     fwhm = 2.0
 
@@ -428,10 +420,6 @@ def peak_detector_main_DAOS(ltp, stp, id, image, coordinates, coeff, full_image,
 
 
 def crop_star_position(ltp, stp, id, df, star_df, image, lim, filename=""):
-    """
-    Crop an area where a star is supposed to be located.
-    This helper keeps the old DataFrame style in case you still need it elsewhere.
-    """
     for ids in range(len(star_df)):
         x = int(star_df["xsensor"].iloc[ids])
         y = int(star_df["ysensor"].iloc[ids])
@@ -442,9 +430,6 @@ def crop_star_position(ltp, stp, id, df, star_df, image, lim, filename=""):
 
 
 def star_comparison(dataframe, star_catalogue):
-    """
-    Check if a found object is a previously detected star by computing the euclidean distance.
-    """
     values = len(dataframe)
 
     for idx in range(values):
@@ -464,9 +449,6 @@ def star_comparison(dataframe, star_catalogue):
 
 
 def remove_similar_objects(pandas_df, threshold=5):
-    """
-    Given a pandas dataframe with detected objects, remove duplicated ones.
-    """
     if len(pandas_df) <= 1:
         return pandas_df
 
@@ -488,9 +470,6 @@ def remove_similar_objects(pandas_df, threshold=5):
 
 
 def points_inside_fov(x, y, center, scale, factor=0.1):
-    """
-    Remove objects whose coordinates are outside metis detection region.
-    """
     radius1 = (sf.METIS_fov_min + factor) / scale
     radius2 = (sf.METIS_fov - factor) / scale
 
@@ -501,9 +480,6 @@ def points_inside_fov(x, y, center, scale, factor=0.1):
 
 
 def remove_objects_fov(df, center, scale):
-    """
-    Remove objects that are outside METIS FOV.
-    """
     vals = []
 
     for i in range(len(df)):
@@ -522,23 +498,17 @@ def remove_objects_fov(df, center, scale):
 def folder_reader(metis_folder, output_folder,
                   KERNEL_PATH, KERNEL_NAME, magnitude, uv, catalog,
                   size, overlapping, std, lim, filter="vl-image",
-                  db_name="psf_metadata_hdf5.db",
-                  h5_name="regions.h5"):
+                  db_name="psf_metadata_sqlite.db"):
     """
-    Extract point-of-interest in a given set of L0 images and save:
-    - metadata to SQLite
-    - cropped regions to HDF5
+    Extract point-of-interest in a given set of L0 images and save
+    everything directly to SQLite.
     """
 
     DAOS = False
 
     sqlite_path = os.path.join(output_folder, db_name)
-    h5_path = os.path.join(output_folder, h5_name)
 
     init_sqlite_db(sqlite_path)
-
-    crop_size = 2 * lim + 1
-    init_hdf5_regions(h5_path, (crop_size, crop_size), dtype=np.float32)
 
     conn = sqlite3.connect(sqlite_path)
     conn.execute("PRAGMA journal_mode=WAL;")
@@ -586,29 +556,13 @@ def folder_reader(metis_folder, output_folder,
 
                         if DAOS:
                             peaks_rows = peak_detector_main_DAOS(
-                                ltp_folder,
-                                stp_folder,
-                                idx,
-                                regions,
-                                coordinates,
-                                std,
-                                image,
-                                lim,
-                                size,
-                                headers.get("FILENAME", fits_file)
+                                ltp_folder, stp_folder, idx, regions, coordinates,
+                                std, image, lim, size, headers.get("FILENAME", fits_file)
                             )
                         else:
                             peaks_rows = peak_detector_main(
-                                ltp_folder,
-                                stp_folder,
-                                idx,
-                                regions,
-                                coordinates,
-                                std,
-                                image,
-                                lim,
-                                size,
-                                headers.get("FILENAME", fits_file)
+                                ltp_folder, stp_folder, idx, regions, coordinates,
+                                std, image, lim, size, headers.get("FILENAME", fits_file)
                             )
 
                         peaks = pd.DataFrame(peaks_rows)
@@ -622,7 +576,6 @@ def folder_reader(metis_folder, output_folder,
 
                         if len(peaks) > 0:
                             peaks_rows = peaks.to_dict(orient="records")
-                            peaks_rows = append_regions_to_hdf5(h5_path, peaks_rows)
                             save_peaks_to_sql(peaks_rows, conn)
 
                         n_stars = len(peaks[peaks["PRE_LABEL"] == "star"]) if len(peaks) > 0 else 0
